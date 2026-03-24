@@ -18,7 +18,7 @@ app.use('/api/health', healthRouter)
 app.use('/api/attestations', attestationsRouter)
 app.use('/api/businesses', businessRoutes)
 app.use('/api/analytics', analyticsRouter)
-app.use('/api/webhooks/razorpay', razorpayWebhookRouter) // ADD THIS
+app.use('/api/webhooks/razorpay', razorpayWebhookRouter)
 
 app.use(errorHandler);
 
