@@ -10,6 +10,12 @@ export default defineConfig({
       reporter: ['text', 'lcov', 'html'],
       include: ['src/**/*.ts'],
       exclude: ['src/**/*.d.ts', 'src/index.ts'],
+      thresholds: {
+        'src/services/integrations/shopify/callback.ts': {
+          lines: 95,
+          branches: 95,
+        },
+      },
     },
   },
 })
