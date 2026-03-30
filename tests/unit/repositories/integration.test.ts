@@ -1,5 +1,14 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { create, update, listByUserId, deleteById, clearAll } from '../../../src/repositories/integration'
+import {
+  clearAllUsers,
+  createUser,
+  findUserByEmail,
+  findUserById,
+  setResetToken,
+  updateUser,
+  updateUserPassword,
+} from '../../../src/repositories/userRepository'
 
 describe('Integration Repository - update function', () => {
   beforeEach(() => {
@@ -188,5 +197,72 @@ describe('Integration Repository - deleteById function', () => {
     const integrations = await listByUserId('user-3')
     expect(integrations).toHaveLength(1)
     expect(integrations[0].id).toBe(integration2.id)
+  })
+})
+
+describe('User Repository - partial update safety', () => {
+  beforeEach(() => {
+    clearAllUsers()
+  })
+
+  it('updates only provided fields when resetting password', async () => {
+    const created = await createUser('user@example.com', 'hash-old')
+
+    const withToken = (await setResetToken(created.id, 'reset-token', 5)) ?? created
+
+    await new Promise(resolve => setTimeout(resolve, 5))
+
+    const updated = await updateUserPassword(created.id, 'hash-new')
+
+    expect(updated).not.toBeNull()
+    expect(updated!.passwordHash).toBe('hash-new')
+    expect(updated!.email).toBe('user@example.com')
+    expect(updated!.resetToken).toBeUndefined()
+    expect(updated!.resetTokenExpiry).toBeUndefined()
+    expect(updated!.createdAt.getTime()).toBe(created.createdAt.getTime())
+    expect(updated!.updatedAt.getTime()).toBeGreaterThan(withToken.updatedAt.getTime())
+
+    // Mutating returned object must not leak into storage
+    updated!.email = 'tampered@example.com'
+    const stored = await findUserById(created.id)
+    expect(stored!.email).toBe('user@example.com')
+  })
+
+  it('sets reset token without touching other fields', async () => {
+    const created = await createUser('user2@example.com', 'hash-original')
+    const previousUpdatedAt = created.updatedAt.getTime()
+
+    await new Promise(resolve => setTimeout(resolve, 5))
+
+    const updated = await setResetToken(created.id, 'token-123', 10)
+
+    expect(updated).not.toBeNull()
+    expect(updated!.resetToken).toBe('token-123')
+    expect(updated!.resetTokenExpiry).toBeInstanceOf(Date)
+    expect(updated!.passwordHash).toBe('hash-original')
+    expect(updated!.createdAt.getTime()).toBe(created.createdAt.getTime())
+    expect(updated!.updatedAt.getTime()).toBeGreaterThan(previousUpdatedAt)
+  })
+
+  it('updates email via partial update and refreshes lookup index', async () => {
+    const created = await createUser('old@example.com', 'hash-email')
+
+    await new Promise(resolve => setTimeout(resolve, 5))
+
+    const updated = await updateUser(created.id, { email: 'new@example.com' })
+    expect(updated).not.toBeNull()
+    expect(updated!.email).toBe('new@example.com')
+
+    const oldLookup = await findUserByEmail('old@example.com')
+    expect(oldLookup).toBeNull()
+
+    const newLookup = await findUserByEmail('new@example.com')
+    expect(newLookup).not.toBeNull()
+    expect(newLookup!.id).toBe(created.id)
+  })
+
+  it('returns null when updating a non-existent user', async () => {
+    const result = await updateUser('missing-id', { email: 'none@example.com' })
+    expect(result).toBeNull()
   })
 })

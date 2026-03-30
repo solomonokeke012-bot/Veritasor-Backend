@@ -10,9 +10,42 @@ export interface User {
   resetTokenExpiry?: Date
 }
 
+/**
+ * Fields that are permitted to be updated on a user record.
+ * Any omitted fields are left untouched to preserve partial update safety.
+ */
+export interface UpdateUserData {
+  email?: string
+  passwordHash?: string
+  resetToken?: string | null
+  resetTokenExpiry?: Date | null
+}
+
 // In-memory user storage
 const users: Map<string, User> = new Map()
 const emailIndex: Map<string, string> = new Map() // email -> userId
+
+function cloneDate(date: Date): Date {
+  return new Date(date.getTime())
+}
+
+function cloneUser(user: User): User {
+  return {
+    ...user,
+    createdAt: cloneDate(user.createdAt),
+    updatedAt: cloneDate(user.updatedAt),
+    ...(user.resetTokenExpiry
+      ? { resetTokenExpiry: cloneDate(user.resetTokenExpiry) }
+      : {}),
+  }
+}
+
+function saveUser(user: User): User {
+  const sanitized = cloneUser(user)
+  users.set(sanitized.id, sanitized)
+  emailIndex.set(sanitized.email, sanitized.id)
+  return sanitized
+}
 
 /**
  * Generate a simple ID
@@ -28,18 +61,17 @@ export async function createUser(
   email: string,
   passwordHash: string
 ): Promise<User> {
+  const now = new Date()
   const user: User = {
     id: generateId(),
     email,
     passwordHash,
-    createdAt: new Date(),
-    updatedAt: new Date(),
+    createdAt: now,
+    updatedAt: now,
   }
 
-  users.set(user.id, user)
-  emailIndex.set(email, user.id)
-
-  return user
+  const stored = saveUser(user)
+  return cloneUser(stored)
 }
 
 /**
@@ -49,14 +81,54 @@ export async function findUserByEmail(email: string): Promise<User | null> {
   const userId = emailIndex.get(email)
   if (!userId) return null
 
-  return users.get(userId) ?? null
+  const user = users.get(userId)
+  return user ? cloneUser(user) : null
 }
 
 /**
  * Find user by ID
  */
 export async function findUserById(id: string): Promise<User | null> {
-  return users.get(id) ?? null
+  const user = users.get(id)
+  return user ? cloneUser(user) : null
+}
+
+/**
+ * Partially update a user while keeping immutable fields intact.
+ * Only properties explicitly provided in `updates` are touched.
+ */
+export async function updateUser(
+  userId: string,
+  updates: UpdateUserData
+): Promise<User | null> {
+  const current = users.get(userId)
+  if (!current) return null
+
+  const next: User = {
+    ...current,
+    email: updates.email ?? current.email,
+    passwordHash: updates.passwordHash ?? current.passwordHash,
+    resetToken:
+      updates.resetToken === null
+        ? undefined
+        : updates.resetToken !== undefined
+        ? updates.resetToken
+        : current.resetToken,
+    resetTokenExpiry:
+      updates.resetTokenExpiry === null
+        ? undefined
+        : updates.resetTokenExpiry !== undefined
+        ? updates.resetTokenExpiry
+        : current.resetTokenExpiry,
+    updatedAt: new Date(),
+  }
+
+  if (current.email !== next.email) {
+    emailIndex.delete(current.email)
+  }
+
+  const stored = saveUser(next)
+  return cloneUser(stored)
 }
 
 /**
@@ -66,15 +138,11 @@ export async function updateUserPassword(
   userId: string,
   passwordHash: string
 ): Promise<User | null> {
-  const user = users.get(userId)
-  if (!user) return null
-
-  user.passwordHash = passwordHash
-  user.updatedAt = new Date()
-  user.resetToken = undefined
-  user.resetTokenExpiry = undefined
-
-  return user
+  return updateUser(userId, {
+    passwordHash,
+    resetToken: null,
+    resetTokenExpiry: null,
+  })
 }
 
 /**
@@ -85,13 +153,10 @@ export async function setResetToken(
   token: string,
   expiryMinutes: number = 30
 ): Promise<User | null> {
-  const user = users.get(userId)
-  if (!user) return null
-
-  user.resetToken = token
-  user.resetTokenExpiry = new Date(Date.now() + expiryMinutes * 60 * 1000)
-
-  return user
+  return updateUser(userId, {
+    resetToken: token,
+    resetTokenExpiry: new Date(Date.now() + expiryMinutes * 60 * 1000),
+  })
 }
 
 /**
@@ -106,7 +171,7 @@ export async function findUserByResetToken(
       user.resetTokenExpiry &&
       user.resetTokenExpiry > new Date()
     ) {
-      return user
+      return cloneUser(user)
     }
   }
   return null
@@ -123,4 +188,13 @@ export async function deleteUser(userId: string): Promise<boolean> {
   users.delete(userId)
 
   return true
+}
+
+/**
+ * Clear all users (testing/cleanup only)
+ * @internal
+ */
+export function clearAllUsers(): void {
+  users.clear()
+  emailIndex.clear()
 }

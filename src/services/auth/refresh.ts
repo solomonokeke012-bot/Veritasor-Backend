@@ -1,8 +1,12 @@
 import { findUserById } from '../../repositories/userRepository.js'
 import {
   generateToken,
+  generateRefreshToken,
   verifyRefreshToken,
 } from '../../utils/jwt.js'
+
+// Simple in-memory store for used tokens (rotation protection)
+const usedRefreshTokens = new Set<string>()
 
 export interface RefreshRequest {
   refreshToken: string
@@ -10,13 +14,27 @@ export interface RefreshRequest {
 
 export interface RefreshResponse {
   accessToken: string
+  refreshToken: string
 }
 
-export async function refresh(request: RefreshRequest): Promise<RefreshResponse> {
+/**
+ * Unified Auth Session Rotation Policy:
+ * - validates refresh token
+ * - prevents reuse
+ * - rotates tokens
+ */
+export async function refresh(
+  request: RefreshRequest
+): Promise<RefreshResponse> {
   const { refreshToken } = request
 
   if (!refreshToken) {
     throw new Error('Refresh token is required')
+  }
+
+  // 🚨 prevent reuse (IMPORTANT for rotation)
+  if (usedRefreshTokens.has(refreshToken)) {
+    throw new Error('Invalid refresh token')
   }
 
   const payload = verifyRefreshToken(refreshToken)
@@ -29,10 +47,21 @@ export async function refresh(request: RefreshRequest): Promise<RefreshResponse>
     throw new Error('User not found')
   }
 
+  // mark old token as used
+  usedRefreshTokens.add(refreshToken)
+
   const accessToken = generateToken({
     userId: user.id,
     email: user.email,
   })
 
-  return { accessToken }
+  const newRefreshToken = generateRefreshToken({
+    userId: user.id,
+    email: user.email,
+  })
+
+  return {
+    accessToken,
+    refreshToken: newRefreshToken,
+  }
 }
