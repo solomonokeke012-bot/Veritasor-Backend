@@ -25,6 +25,10 @@ npm run dev
 
 API runs at `http://localhost:3000`. Use `PORT` env var to override.
 
+## Rate Limiting
+
+The shared rate limiter in [src/middleware/rateLimiter.ts](src/middleware/rateLimiter.ts) supports explicit route-level buckets. Apply a stable bucket name per sensitive route so bursts against one endpoint do not consume the budget for another endpoint. Auth routes use this for login, refresh, forgot-password, reset-password, and `me`, while signup keeps its dedicated abuse-prevention limiter.
+
 ## Scripts
 
 | Command          | Description                    |
@@ -46,11 +50,45 @@ All API routes are versioned and mounted under `/api/v1`. This enables future co
 
 ## API (current)
 
-| Method | Path                      | Description              |
-|--------|---------------------------|--------------------------|
-| GET    | `/api/v1/health`          | Health check             |
-| GET    | `/api/v1/attestations`    | List attestations (stub) |
-| POST   | `/api/v1/attestations`    | Submit attestation (stub)|
+| Method | Path                      | Description              | Auth Required |
+|--------|---------------------------|--------------------------|---------------|
+| GET    | `/api/v1/health`          | Health check             | No |
+| GET    | `/api/v1/attestations`    | List attestations (stub) | User Auth |
+| POST   | `/api/v1/attestations`    | Submit attestation (stub)| User Auth |
+| GET    | `/api/v1/businesses/me`   | Get user business        | User Auth |
+| POST   | `/api/v1/businesses`      | Create business           | User Auth |
+| PATCH  | `/api/v1/businesses/me`   | Update business           | User Auth |
+
+## Authentication & Authorization
+
+### User Authentication
+The API uses JWT-based authentication. Include the token in the `Authorization` header:
+
+```http
+Authorization: Bearer <your_jwt_token>
+```
+
+### Business Authorization
+For business-scoped operations, use the enhanced business authorization middleware:
+
+```http
+Authorization: Bearer <your_jwt_token>
+x-business-id: <business_id>
+```
+
+**Security Features:**
+- JWT token validation with user existence verification
+- Business ownership enforcement (users can only access their own businesses)
+- Input validation and injection prevention
+- Detailed error responses with structured error codes
+
+**Error Codes:**
+- `MISSING_AUTH` (401): Missing or invalid Authorization header
+- `INVALID_TOKEN` (401): Invalid, expired, or malformed JWT token
+- `MISSING_BUSINESS_ID` (400): Business ID not provided or invalid format
+- `BUSINESS_NOT_FOUND` (403): Business not found or access denied
+
+For detailed documentation, see [Business Authorization Boundary Checks](docs/business-authorization-boundary-checks.md).
 
 ## Project structure
 

@@ -32,3 +32,40 @@ describe('MerkleTree', () => {
     expect(bad).toBe(false)
   })
 })
+describe('MerkleTree – empty dataset rejection', () => {
+
+  it('throws when constructed with an empty array', () => {
+    expect(() => new MerkleTree([])).toThrow()
+  })
+
+  it('throws an error (not silently returns undefined root)', () => {
+    expect(() => new MerkleTree([])).toThrowError()
+  })
+
+  it('does not return a valid root for empty input', () => {
+    let root: string | undefined
+    try {
+      const tree = new MerkleTree([])
+      root = tree.getRoot()
+    } catch {
+      root = undefined
+    }
+    expect(root).toBeUndefined()
+  })
+
+  it('throws when all leaves are empty strings', () => {
+    expect(() => new MerkleTree(['', '', ''])).toThrow()
+  })
+
+  it('does not produce the same root as a non-empty tree when given empty input', () => {
+    const validTree = new MerkleTree(['a'])
+    let emptyRoot: string | undefined
+    try {
+      emptyRoot = new MerkleTree([]).getRoot()
+    } catch {
+      emptyRoot = undefined
+    }
+    expect(emptyRoot).not.toBe(validTree.getRoot())
+  })
+
+})

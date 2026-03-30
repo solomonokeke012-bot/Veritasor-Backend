@@ -1,12 +1,14 @@
-import express from 'express'
-import cors from 'cors'
-import { attestationsRouter } from './routes/attestations.js'
-import { healthRouter } from './routes/health.js'
+import express from "express";
+import cors from "cors";
+import { attestationsRouter } from "./routes/attestations.js";
+import { healthRouter } from "./routes/health.js";
+import { requestLogger } from "./middleware/requestLogger.js";
 
-export const app = express()
+export const app = express();
 
-app.use(cors())
-app.use(express.json())
+app.use(cors());
+app.use(express.json());
+app.use(requestLogger);
 
-app.use('/api/health', healthRouter)
-app.use('/api/attestations', attestationsRouter)
+app.use("/api/health", healthRouter);
+app.use("/api/attestations", attestationsRouter);
