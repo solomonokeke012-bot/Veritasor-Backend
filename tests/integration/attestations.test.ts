@@ -2,8 +2,7 @@
  * Integration tests for attestations API.
  * Uses requireAuth; expects 401 when unauthenticated.
  */
-import { test } from 'node:test'
-import assert from 'node:assert'
+import { describe, it, expect, vi } from 'vitest'
 import request from 'supertest'
 import { app } from '../../src/app.js'
 import {
