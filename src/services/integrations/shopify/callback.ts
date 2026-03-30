@@ -11,6 +11,8 @@ export interface CallbackParams {
   code: string
   shop: string
   state: string
+  hmac?: string
+  [key: string]: string | undefined
 }
 
 export interface CallbackResult {
@@ -27,8 +29,27 @@ export async function handleCallback(params: CallbackParams): Promise<CallbackRe
   const clientId = process.env.SHOPIFY_CLIENT_ID ?? ''
   const clientSecret = process.env.SHOPIFY_CLIENT_SECRET ?? ''
 
+  const { code, shop, state, hmac } = params
+
+  // Parameter completeness guard — check code, shop, state first
   if (!code || !shop || !state) {
-    return { success: false, error: 'Missing code, shop, or state' }
+    return { success: false, error: 'Missing required callback parameters' }
+  }
+
+  // HMAC presence guard — absent or empty string both count as missing
+  if (!hmac) {
+    return { success: false, error: 'Missing HMAC signature' }
+  }
+
+  // HMAC validation using constant-time comparison
+  const computed = computeShopifyHmac(currentClientSecret, params)
+  const computedBuf = Buffer.from(computed)
+  const providedBuf = Buffer.from(hmac)
+  if (
+    computedBuf.length !== providedBuf.length ||
+    !timingSafeEqual(computedBuf, providedBuf)
+  ) {
+    return { success: false, error: 'Invalid HMAC signature' }
   }
 
   const shopHost = store.normalizeShop(shop)
@@ -41,14 +62,10 @@ export async function handleCallback(params: CallbackParams): Promise<CallbackRe
     return { success: false, error: 'Invalid or expired state' }
   }
 
-  if (!clientId || !clientSecret) {
-    return { success: false, error: 'Shopify app not configured' }
-  }
-
   const tokenUrl = `https://${shopHost}/admin/oauth/access_token`
   const body = new URLSearchParams({
-    client_id: clientId,
-    client_secret: clientSecret,
+    client_id: currentClientId,
+    client_secret: currentClientSecret,
     code,
   })
 
