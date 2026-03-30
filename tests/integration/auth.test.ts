@@ -9,6 +9,7 @@ import {
   NotFoundError,
   ConflictError,
 } from "../../src/types/errors.js";
+import { runStartupDependencyReadinessChecks } from "../../src/startup/readiness.js";
 
 /**
  * Integration tests for authentication API endpoints
@@ -64,6 +65,24 @@ let resetTokenStore: Array<{
   token: string;
   expiresAt: string;
 }> = [];
+
+
+/**
+ * Minimal in-test limiter stub for mock router scaffolding.
+ *
+ * The mocked auth router does not currently enforce limits, but tests retain
+ * route-level limiter declarations for parity with production wiring.
+ */
+function rateLimiter(_config: { bucket: string; max: number; windowMs: number }) {
+  return (_req: express.Request, _res: express.Response, next: express.NextFunction) => next();
+}
+
+/**
+ * Reset helper kept for test lifecycle symmetry.
+ */
+function resetRateLimiterStore(): void {
+  // no-op in this test file
+}
 
 /**
  * Helper function to validate error envelope format
@@ -582,7 +601,7 @@ describe("POST /api/auth/refresh", () => {
       .send({ refreshToken })
       .expect(401);
 
-    expect(replayResponse.body.error).toMatch(/invalid refresh token/i);
+    expect(replayResponse.body.message).toMatch(/invalid refresh token/i);
 
     const rotatedTokenResponse = await request(app)
       .post("/api/auth/refresh")
@@ -1337,5 +1356,74 @@ describe("Security Considerations", () => {
       .get("/api/auth/nonexistent")
       .expect(404);
     expect(response.body.code).toBe("NOT_FOUND");
+  });
+});
+
+
+/**
+ * Startup dependency readiness integration checks.
+ *
+ * Validates success, failure, and edge behavior for app boot dependency checks.
+ */
+describe("Startup dependency readiness checks", () => {
+  const originalEnv = { ...process.env };
+
+  beforeEach(() => {
+    process.env = { ...originalEnv };
+    vi.restoreAllMocks();
+    vi.resetModules();
+  });
+
+  afterAll(() => {
+    process.env = originalEnv;
+  });
+
+  it("should fail readiness in production when JWT_SECRET is missing", async () => {
+    process.env.NODE_ENV = "production";
+    delete process.env.JWT_SECRET;
+    delete process.env.DATABASE_URL;
+
+    const report = await runStartupDependencyReadinessChecks();
+
+    expect(report.ready).toBe(false);
+    expect(report.checks).toContainEqual(
+      expect.objectContaining({ dependency: "config", ready: false }),
+    );
+  });
+
+  it("should skip database startup check when DATABASE_URL is not configured", async () => {
+    process.env.NODE_ENV = "development";
+    process.env.JWT_SECRET = "x".repeat(32);
+    delete process.env.DATABASE_URL;
+
+    const report = await runStartupDependencyReadinessChecks();
+
+    expect(report.ready).toBe(true);
+    expect(report.checks.some((check) => check.dependency === "database")).toBe(false);
+  });
+
+  it("should mark database as down when connectivity check fails", async () => {
+    process.env.NODE_ENV = "development";
+    process.env.JWT_SECRET = "x".repeat(32);
+    process.env.DATABASE_URL = "postgres://unreachable-host:5432/veritasor";
+
+    vi.doMock("pg", () => ({
+      default: {
+        Client: class {
+          async connect(): Promise<void> {
+            throw new Error("connection refused");
+          }
+          async query(): Promise<void> {}
+          async end(): Promise<void> {}
+        },
+      },
+    }));
+
+    const report = await runStartupDependencyReadinessChecks();
+
+    expect(report.ready).toBe(false);
+    expect(report.checks).toContainEqual(
+      expect.objectContaining({ dependency: "database", ready: false }),
+    );
   });
 });
