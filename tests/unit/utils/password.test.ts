@@ -36,6 +36,30 @@ describe("password utility", () => {
     expect(typeof hashed).toBe("string");
     expect(hashed.length).toBeGreaterThan(0);
   });
+
+  describe("Unicode edge cases", () => {
+    it("should hash and verify passwords with emojis", async () => {
+      const plain = "p@ssw🔒rd😊";
+      const hashed = await hash(plain);
+      expect(await verify(plain, hashed)).toBe(true);
+      expect(await verify("p@ssw🔒rd😢", hashed)).toBe(false);
+    });
+
+    it("should hash and verify passwords with combining characters", async () => {
+      const plain = "cafe9"; // 'café' with single code point
+      const plain2 = "cafe9".normalize("NFC"); // forcibly normalized
+      const hashed = await hash(plain);
+      expect(await verify(plain, hashed)).toBe(true);
+      expect(await verify(plain2, hashed)).toBe(false); // different normalization
+    });
+
+    it("should hash and verify passwords with non-Latin scripts", async () => {
+      const plain = "пароль"; // Russian for 'password'
+      const hashed = await hash(plain);
+      expect(await verify(plain, hashed)).toBe(true);
+      expect(await verify("パスワード", hashed)).toBe(false); // Japanese for 'password'
+    });
+  });
 });
 
 describe("resetPassword service", () => {
