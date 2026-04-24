@@ -217,3 +217,26 @@ If a `CRITICAL CONSISTENCY ERROR` is observed in logs:
 1.  Verify the on-chain data using a block explorer or `stellar-cli`.
 2.  Check the database for unauthorized modifications.
 3.  Initiate a manual re-sync if the DB record is corrupted.
+
+## Email Security & Template Hardening
+
+The email service implements strict validation and sanitization to prevent injection attacks.
+
+### Injection Prevention
+
+1.  **Input Validation (Zod)**:
+    -   All emails are validated against the `z.string().email()` schema.
+    -   Reset links are validated to ensure they use safe protocols (`https:` or `http:` in dev). Unsafe protocols like `javascript:` or `data:` are rejected.
+
+2.  **HTML Escaping**:
+    -   All dynamic values interpolated into HTML templates are escaped using a dedicated `escapeHtml` utility.
+    -   This prevents attackers from injecting malicious HTML tags (e.g., `<script>`, `<iframe>`, `<img>`) even if they manage to partially control the link or other parameters.
+
+### Threat Model: Email Risks
+
+| Threat | Strategy | Mechanism |
+| :--- | :--- | :--- |
+| **HTML Injection** | Sanitization | `escapeHtml` converts `<`, `>`, `&`, `"`, and `'` into entities. |
+| **Link Wrapping/Phishing** | Protocol Gating | Only allowed protocols are permitted; others trigger a validation error. |
+| **Header Injection** | SMTP Library Safety | Use of `nodemailer` which handles header sanitization internally, combined with Zod validation of the `to` field. |
+| **Information Leakage** | Dev Stubs | In development mode, reset links are logged to the console instead of sent, and the `to` address is never leaked in unauthorized contexts. |
