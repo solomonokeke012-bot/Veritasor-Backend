@@ -25,12 +25,14 @@ npm run test:coverage
 tests/
 ├── unit/
 │   └── services/
+│       ├── integration/
+│       │   └── auth.test.ts            # Config validation + password reset flow
 │       └── revenue/
-│           └── normalize.test.ts   # normalizeRevenueEntry, detectNormalizationDrift,
-│                                   # detectRevenueAnomaly, calibrateFromSeries
+│           └── normalize.test.ts       # normalizeRevenueEntry, detectNormalizationDrift,
+│                                       # detectRevenueAnomaly, calibrateFromSeries
 └── integration/
-    ├── auth.test.ts                # Auth API flows (signup, login, refresh, reset)
-    ├── integrations.test.ts        # Integrations API flows (list, connect, OAuth)
+    ├── auth.test.ts                    # Auth API flows (signup, login, refresh, reset)
+    ├── integrations.test.ts            # Integrations API flows (list, connect, OAuth)
     └── razorpay-connect-state.test.ts  # Razorpay connect initiation: state & redirect URL safety
 ```
 
@@ -188,6 +190,133 @@ multiple times with the same series. Neither function mutates its input array.
 
 ---
 
+## Password Reset Flow — Operator Guide
+
+### Overview
+
+The password reset flow spans two services:
+
+| Service | File | Responsibility |
+|---|---|---|
+| `forgotPassword` | `src/services/auth/forgotPassword.ts` | Generates token, sends email |
+| `resetPassword` | `src/services/auth/resetPassword.ts` | Validates token, updates password |
+
+Both services accept an optional structured-log callback (same pattern as anomaly
+detection) and surface all failures as typed `AppError` instances — no silent
+failures.
+
+### Environment Variables
+
+| Variable | Type | Default | Description |
+|---|---|---|---|
+| `RESET_PASSWORD_URL` | string | `http://localhost:3000/reset-password` | Base URL prepended to the reset token. Must be set to the frontend URL in production. |
+| `RESET_TOKEN_TTL_MINUTES` | int | `15` | Token lifetime in minutes. Must be in `(0, 60]`. Values outside this range fall back to `15` with a `stderr` warning. |
+| `RESET_MIN_PASSWORD_LENGTH` | int | `8` | Minimum length enforced on the new password. Must be `≥ 8`. Values below `8` fall back to `8` with a `stderr` warning. |
+
+**Production checklist:**
+- Set `RESET_PASSWORD_URL` to your actual frontend origin (`https://app.veritasor.com/reset-password`).
+- Keep `RESET_TOKEN_TTL_MINUTES` at `15` or lower. The threat model requires tokens to be short-lived.
+- `NODE_ENV=production` suppresses the `resetLink` field from API responses (it is present in `development` / `test` for local debugging only).
+
+### Rate Limiting
+
+Forgot-password and reset-password routes use the shared `rateLimiter` middleware
+with explicit named buckets:
+
+| Route | Bucket name | Recommended limits |
+|---|---|---|
+| `POST /api/v1/auth/forgot-password` | `auth:forgot-password` | 5 req / 15 min per IP |
+| `POST /api/v1/auth/reset-password` | `auth:reset-password` | 10 req / 15 min per IP |
+
+Named buckets ensure that abuse against the forgot-password endpoint cannot exhaust
+the rate-limit budget for login or token refresh routes. Configure window and max via
+`RATE_LIMIT_WINDOW_MS` and `RATE_LIMIT_MAX`, or pass per-route options directly to
+`rateLimiter({ bucket: 'auth:forgot-password', windowMs: 15 * 60 * 1000, max: 5 })`.
+
+### Security Properties
+
+| Property | Implementation |
+|---|---|
+| **User enumeration resistance** | The same response message and a 200 ms constant-time delay are returned whether or not the email exists. |
+| **Token entropy** | 32 random bytes (`crypto.randomBytes`) → 64 lowercase hex chars (256-bit). Not guessable. |
+| **Token single-use** | `updateUserPassword` atomically clears `resetToken` + `resetTokenExpiry` alongside the password update. Replayed tokens return `INVALID_RESET_TOKEN`. |
+| **Token TTL** | Configurable, default 15 min. Expired tokens are rejected at the repository layer. |
+| **Timing attack mitigation** | `findUserByEmail` and the 200 ms delay run in parallel via `Promise.all`, equalising response time for found vs. not-found branches. |
+| **Email delivery cleanup** | On any delivery failure (retryable or permanent) the token is cleared from the DB before the error is thrown, preventing dangling unusable tokens. |
+| **Audit log — token prefix only** | Log records include only the first 8 hex chars of the token (sufficient for incident correlation, insufficient for forgery). The full token never appears in logs. |
+| **No production reset link** | `resetLink` is omitted from the response when `NODE_ENV=production`. |
+
+### Structured Audit Log
+
+Wire the logger callback in your route handler to your application logger:
+
+```ts
+import pino from 'pino';
+import { forgotPassword } from '../services/auth/forgotPassword.js';
+import { resetPassword } from '../services/auth/resetPassword.js';
+
+const log = pino();
+
+// In your forgot-password route:
+await forgotPassword({ email }, (record) => log.info(record, 'auth'));
+
+// In your reset-password route:
+await resetPassword({ token, newPassword }, (record) => log.info(record, 'auth'));
+```
+
+**`ForgotPasswordAuditRecord` events:**
+
+| Event | When emitted |
+|---|---|
+| `forgot_password_requested` | Every call, before any DB lookup |
+| `forgot_password_user_not_found` | Email not in the database |
+| `forgot_password_token_issued` | Token written to DB successfully |
+| `forgot_password_email_sent` | Email delivery succeeded |
+| `forgot_password_email_retryable_failure` | Email provider returned a retryable error |
+| `forgot_password_email_permanent_failure` | Email provider returned a non-retryable error |
+
+**`ResetPasswordAuditRecord` events:**
+
+| Event | When emitted |
+|---|---|
+| `reset_password_attempted` | Every call, before token lookup |
+| `reset_password_invalid_token` | Token not found or expired |
+| `reset_password_success` | Password updated and token consumed |
+
+### Error Codes
+
+| Code | HTTP | Meaning |
+|---|---|---|
+| `VALIDATION_ERROR` | 400 | Missing or invalid input fields |
+| `INVALID_RESET_TOKEN` | 400 | Token not found, expired, or already consumed |
+| `RESET_EMAIL_RETRYABLE_FAILURE` | 503 | Email delivery failed transiently; client should retry |
+| `RESET_EMAIL_UNAVAILABLE` | 500 | Email delivery failed permanently |
+
+### Failure Modes
+
+| Condition | Behaviour |
+|---|---|
+| Email not in DB | Generic 200 response; no token stored; no email sent |
+| Email delivery — retryable | Token cleared from DB; throws `503 RESET_EMAIL_RETRYABLE_FAILURE` |
+| Email delivery — permanent | Token cleared from DB; throws `500 RESET_EMAIL_UNAVAILABLE` |
+| Invalid / expired token at reset | Throws `400 INVALID_RESET_TOKEN`; no DB write |
+| Password too short | Throws `400 VALIDATION_ERROR` before token lookup |
+| Invalid `RESET_TOKEN_TTL_MINUTES` | Falls back to `15`; warning to `stderr` |
+| Invalid `RESET_MIN_PASSWORD_LENGTH` | Falls back to `8`; warning to `stderr` |
+
+### Idempotency
+
+`forgotPassword` is **not** idempotent by design — each call that finds a valid user
+generates and stores a new token, invalidating the previous one (because
+`setResetToken` overwrites the stored token). Operators should rely on rate limiting
+to prevent excessive token churn.
+
+`resetPassword` is idempotent in its rejection behaviour — calling it twice with the
+same token will return `INVALID_RESET_TOKEN` on the second call because the token is
+consumed on first use.
+
+---
+
 ## Razorpay Connect Initiation — State Validation & Redirect URL Safety
 
 ### Overview
@@ -294,6 +423,47 @@ Rejection reasons returned by `validateRazorpayState`:
 
 ## Security — Threat Model Notes
 
+### Auth Routes — Password Reset
+
+#### User Enumeration
+`forgotPassword` returns the identical response message and waits a constant ~200 ms
+regardless of whether the supplied email exists. An observer who times the HTTP
+response cannot distinguish "user found" from "user not found" beyond normal network
+jitter.
+
+#### Token Forgery
+Reset tokens are 32 random bytes (256-bit entropy) from `crypto.randomBytes`. The
+probability of guessing a valid token is negligible. Tokens are stored server-side and
+compared at the repository layer (timing-safe comparison recommended).
+
+#### Token Replay
+`updateUserPassword` atomically clears `resetToken` and `resetTokenExpiry` in the
+same DB transaction as the password update. A second call with the same token returns
+`INVALID_RESET_TOKEN` because the repository lookup finds nothing.
+
+#### Brute Force / Rate Limiting
+Both routes must be protected by the named-bucket rate limiter (see Rate Limiting
+above). Without rate limiting, an attacker could brute-force the 64-hex token space —
+though 256-bit entropy makes this computationally infeasible, rate limiting provides
+defence in depth and prevents denial-of-service via token generation storms.
+
+#### Email Interception
+Reset links are transmitted over email, which may be less secure than HTTPS. Operators
+should:
+1. Use short TTLs (`RESET_TOKEN_TTL_MINUTES ≤ 15`).
+2. Ensure the frontend resets URL accepts tokens only over HTTPS.
+3. Rotate email provider credentials if a breach is suspected.
+
+#### Token Leakage via Logs
+Structured log records include only the first 8 hex chars of the token
+(`tokenPrefix`). The full 64-char token is never written to any log record. Do not
+log the raw request body on forgot/reset routes.
+
+#### dangling Tokens on Email Failure
+If email delivery fails (retryable or permanent), the token is cleared from the DB
+before the error is propagated. The user is never left with a stored, unsendable token
+that could be leaked via a subsequent DB exposure.
+
 ### Razorpay OAuth Initiation
 
 #### Open-Redirect Prevention
@@ -352,16 +522,6 @@ The `detail` string in `AnomalyResult` and the `AnomalyLogRecord` payload embed
 `period` and `amount` values from the caller-supplied input series. Ensure your log
 aggregator escapes or sanitises these fields before rendering them in dashboards
 or alert messages.
-
-### Auth Routes
-
-- JWT tokens must be validated on every request; user existence is re-verified
-  against the database to detect revoked accounts.
-- Rate limiting is applied per route bucket (see `src/middleware/rateLimiter.ts`);
-  auth endpoints (login, refresh, forgot-password, reset-password) use named buckets
-  so bursts against one endpoint cannot exhaust the shared budget for another.
-- Password reset tokens must be single-use and short-lived (< 15 minutes).
-- Signup uses a dedicated abuse-prevention limiter stricter than the shared bucket.
 
 ### Webhooks & Integrations
 
@@ -490,3 +650,5 @@ afterAll(async () => {
 | Private keys never appear in logs or API responses | Audit log assertions scan for `G...` and `S...` key patterns |
 | Identical requests don't result in multiple on-chain transactions | Check DB for a single record after multiple POST bursts |
 | Razorpay OAuth state cannot be forged, replayed, or stolen cross-user | State tests in `razorpay-connect-state.test.ts` assert each property |
+| Password reset tokens cannot be replayed | `resetPassword` called twice with same token returns `INVALID_RESET_TOKEN` on second call |
+| Password reset does not leak user existence | `forgotPassword` response is identical for found and not-found emails |
