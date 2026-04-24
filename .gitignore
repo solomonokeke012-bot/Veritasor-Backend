@@ -12,3 +12,5 @@ coverage
 # Test artifacts
 .jest-cache
 node_modules
+
+dist/

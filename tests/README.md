@@ -20,6 +20,60 @@ npm run test:coverage
 - `integration/` - Integration tests that test complete API flows
   - `auth.test.ts` - Authentication API tests (signup, login, refresh, password reset)
   - `integrations.test.ts` - Integrations API tests (list, connect, disconnect, OAuth flow)
+  - `business.test.ts` - Business service API tests (create, update, get, normalization, security)
+
+## Business Service Tests
+
+The business integration tests (`tests/integration/business.test.ts`) cover:
+
+1. **Create Business** (`POST /api/businesses`)
+   - Creates with all valid fields including optional `countryCode`
+   - Whitespace normalization (name, industry, website, countryCode)
+   - URL normalization (`example.com` → `https://example.com`)
+   - Optional fields default to `null` when omitted or empty
+   - Unicode business names accepted
+   - Duplicate prevention — returns **409** with `error: 'BUSINESS_ALREADY_EXISTS'`
+   - Unauthenticated requests return **401**
+
+2. **Update Business** (`PATCH /api/businesses/me`)
+   - Partial updates (only provided fields are changed)
+   - Value normalization applied on update too
+   - 404 when no business exists for the user
+
+3. **Get Business** (`GET /api/businesses/me`, `GET /api/businesses/:id`)
+
+4. **Input Normalization Edge Cases** — unicode, max-length values, multiline descriptions
+
+5. **Security** — XSS in name (400), SQL injection in description (202/400), oversized input (400)
+
+### `countryCode` Field
+
+- Accepts any **ISO 3166-1 alpha-2** code (`US`, `NG`, `GB`, …)
+- Input is case-insensitive — `'ng'` is normalized to `'NG'`
+- Field is **optional**; omitting it yields `null` in the response
+- Values that are not exactly 2 alpha characters return **400 VALIDATION_ERROR**
+
+### Stable Error Codes
+
+All handlers return a machine-readable `error` string alongside the human `message`:
+
+| HTTP | `error` string           | Meaning                         |
+|------|--------------------------|---------------------------------|
+| 400  | `VALIDATION_ERROR`       | Zod schema validation failed; `details` is an array of Zod issues |
+| 401  | `UNAUTHORIZED`           | No authenticated user in request |
+| 404  | `NOT_FOUND`              | Business not found for this user |
+| 409  | `BUSINESS_ALREADY_EXISTS`| User already owns a business     |
+| 500  | `INTERNAL_ERROR`         | Unexpected server failure        |
+
+### Environment Variables
+
+No additional env vars beyond those listed in `.env.example` are required to run the business service tests. The test suite uses an in-memory store; no real database connection is needed.
+
+### Failure Modes & Idempotency
+
+- Creating a business twice for the same user always returns **409 BUSINESS_ALREADY_EXISTS** — the second call is a no-op, the original record is preserved.
+- Validation errors are non-destructive — no partial writes occur on **400** responses.
+- Structured logs (`event`, `userId`, `error`) are emitted on **500** for operator debugging.
 
 ## Test Setup
 

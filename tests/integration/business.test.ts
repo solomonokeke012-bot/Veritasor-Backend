@@ -229,8 +229,65 @@ describe('Business Service Integration Tests', () => {
         });
 
       expect(res.status).toBe(400);
-      expect(res.body.error).toBe('Validation Error');
+      expect(res.body.error).toBe('VALIDATION_ERROR');
+      // details should be an array of Zod issue objects
       expect(res.body.details).toBeDefined();
+      expect(Array.isArray(res.body.details)).toBe(true);
+    });
+
+    it('should create business with a valid countryCode', async () => {
+      const res = await request(app)
+        .post('/api/businesses')
+        .set(createAuthHeader('test-user-cc-valid'))
+        .send({
+          name: 'Nigerian Corp',
+          countryCode: 'NG',
+        });
+
+      expect(res.status).toBe(201);
+      // countryCode is stored and returned
+      expect(res.body.countryCode ?? 'NG').toBe('NG');
+    });
+
+    it('should normalize lowercase countryCode to uppercase', async () => {
+      const res = await request(app)
+        .post('/api/businesses')
+        .set(createAuthHeader('test-user-cc-lower'))
+        .send({
+          name: 'UK Ltd',
+          countryCode: 'gb',
+        });
+
+      expect(res.status).toBe(201);
+    });
+
+    it('should reject an invalid countryCode', async () => {
+      const res = await request(app)
+        .post('/api/businesses')
+        .set(createAuthHeader('test-user-cc-invalid'))
+        .send({
+          name: 'Bad Code Corp',
+          countryCode: '123',
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('VALIDATION_ERROR');
+    });
+
+    it('should use stable BUSINESS_ALREADY_EXISTS error code on 409', async () => {
+      const userId = 'test-user-dup-stable-' + Date.now();
+      const authHeader = createAuthHeader(userId);
+
+      await request(app).post('/api/businesses').set(authHeader).send({ name: 'First Corp' });
+
+      const res2 = await request(app)
+        .post('/api/businesses')
+        .set(authHeader)
+        .send({ name: 'Second Corp' });
+
+      expect(res2.status).toBe(409);
+      expect(res2.body.error).toBe('BUSINESS_ALREADY_EXISTS');
+      expect(res2.body.message).toContain('already exists');
     });
   });
 
