@@ -184,3 +184,72 @@ The following security assumptions are baked into the system and must be validat
 4. **Idempotency Integrity**:
     - *Assumption*: Multiple identical requests do not result in multiple on-chain transactions (saving gas/fees).
     - *Validation*: Check local database for single record entry after multiple POST bursts.
+
+---
+
+## Attestation Repository — High-Volume Query Guidance
+
+### New query methods (PR #250)
+
+| Method | Index used | Purpose |
+|---|---|---|
+| `listByBusiness(client, businessId, pagination, timeoutMs?)` | `attestations_business_id_created_at_idx` | Paginated list for one business |
+| `countByBusiness(client, businessId, timeoutMs?)` | `attestations_business_id_created_at_idx` | Total count for one business |
+| `listByStatus(client, status, pagination, timeoutMs?)` | `attestations_status_created_at_idx` | Paginated list by status (e.g. background jobs) |
+
+The composite indexes are created by migration `20260424_002_attestations_high_volume_indexes.sql`.
+
+### Environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `ATTESTATION_QUERY_TIMEOUT_MS` | `0` (disabled) | Global statement timeout for all attestation queries. Set to e.g. `5000` to abort queries that run longer than 5 s. Individual call sites can override with the `timeoutMs` parameter. |
+
+### Verifying index usage
+
+After running the migration on a populated database, confirm the planner uses the composite indexes:
+
+```sql
+-- listByBusiness / countByBusiness
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT * FROM attestations
+WHERE business_id = '<uuid>'
+ORDER BY created_at DESC
+LIMIT 50 OFFSET 0;
+-- Expected: Index Scan using attestations_business_id_created_at_idx
+
+-- listByStatus
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT * FROM attestations
+WHERE status = 'pending'
+ORDER BY created_at DESC
+LIMIT 50 OFFSET 0;
+-- Expected: Index Scan using attestations_status_created_at_idx
+```
+
+If the planner chooses a sequential scan, run `ANALYZE attestations;` to refresh statistics.
+
+### Failure modes
+
+| Scenario | Behaviour |
+|---|---|
+| Query exceeds `timeoutMs` | PostgreSQL raises `57014 query_canceled`; the error propagates to the caller — no silent failure. |
+| `ATTESTATION_QUERY_TIMEOUT_MS` not set | No timeout is applied; queries run to completion. |
+| Read-replica lag | Pass a replica `DbClient` to any read method. The repository is stateless and does not manage routing. |
+
+### Threat model notes
+
+**Auth / business isolation**
+- `listByBusiness` and `countByBusiness` accept a raw `businessId`. Callers **must** verify that the authenticated user owns the business before passing the ID. The repository does not enforce ownership — that is the responsibility of the route/service layer (see `requireBusinessAuth` middleware).
+- Passing an arbitrary `businessId` from an unauthenticated request would expose another business's attestation count and metadata. Always gate these calls behind `requireBusinessAuth`.
+
+**Statement timeout as a DoS mitigation**
+- Setting `ATTESTATION_QUERY_TIMEOUT_MS` limits the blast radius of slow queries caused by missing indexes, large offsets, or adversarial pagination parameters. Recommended value for production: `5000` (5 s).
+- The timeout is applied with `SET LOCAL statement_timeout`, which is scoped to the current transaction/statement and automatically reset. It does not affect other concurrent sessions.
+
+**Webhooks and integrations**
+- Background jobs that use `listByStatus('pending', ...)` should be idempotent: re-processing a row that was already submitted must not create a duplicate on-chain transaction. Use the `Idempotency-Key` header or check `status` before submitting.
+- Integration OAuth tokens are never returned by repository methods. Token storage and rotation are handled by the integrations service layer.
+
+**Logging**
+- Structured log events (`attestation.listByBusiness`, `attestation.countByBusiness`, `attestation.listByStatus`) include `businessId`, `total`, `limit`, and `offset`. These fields must not be used to infer sensitive business metrics in public-facing logs. Ensure log aggregation pipelines apply appropriate access controls.

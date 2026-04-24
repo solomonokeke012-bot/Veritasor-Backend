@@ -8,6 +8,9 @@ import {
   update,
   createWithConflictCheck,
   remove,
+  listByBusiness,
+  countByBusiness,
+  listByStatus,
 } from '../../../src/repositories/attestationRepository.js';
 import {
   ConflictError,
@@ -803,6 +806,218 @@ describe('Attestation Repository - Transaction Rollback Paths', () => {
       expect(after).not.toBeNull();
       expect(after!.status).toBe('pending');
       expect(after!.version).toBe(1);
+    });
+  });
+});
+
+// ─── High-Volume Query Patterns ───────────────────────────────────────────────
+
+/**
+ * High-Volume Query Pattern Tests
+ *
+ * These tests verify the three high-volume query helpers introduced for #250:
+ *   - listByBusiness  — paginated list scoped to one business
+ *   - countByBusiness — total count for one business
+ *   - listByStatus    — paginated list filtered by status
+ *
+ * Each test also exercises the optional `timeoutMs` parameter to confirm that
+ * the SET LOCAL statement_timeout path is exercised without errors.
+ *
+ * Index expectations (verified in integration / EXPLAIN tests):
+ *   listByBusiness / countByBusiness → attestations_business_id_created_at_idx
+ *   listByStatus                     → attestations_status_created_at_idx
+ */
+
+/**
+ * Extended MockDbClient that tracks SET LOCAL calls so tests can assert
+ * that statement_timeout was applied when timeoutMs > 0.
+ */
+class TimeoutTrackingMockDbClient extends MockDbClient {
+  public timeoutStatements: string[] = [];
+
+  async query<T>(sql: string, params?: any[]): Promise<{ rows: T[] }> {
+    const trimmed = sql.trim();
+    if (/^SET LOCAL statement_timeout/i.test(trimmed)) {
+      this.timeoutStatements.push(trimmed);
+      return { rows: [] as T[] };
+    }
+    return super.query<T>(sql, params);
+  }
+}
+
+describe('Attestation Repository - High-Volume Query Patterns', () => {
+  let mockClient: MockDbClient;
+
+  beforeEach(() => {
+    mockClient = new MockDbClient();
+  });
+
+  // ── listByBusiness ──────────────────────────────────────────────────────────
+
+  describe('listByBusiness', () => {
+    it('returns empty result when business has no attestations', async () => {
+      const result = await listByBusiness(mockClient, 'business-123', { limit: 10, offset: 0 });
+      expect(result.items).toHaveLength(0);
+      expect(result.total).toBe(0);
+    });
+
+    it('returns all attestations for a business', async () => {
+      await create(mockClient, {
+        businessId: 'business-123', period: '2025-hv-01',
+        merkleRoot: '0x' + 'a'.repeat(64), txHash: '0x' + 'b'.repeat(64), status: 'pending',
+      });
+      await create(mockClient, {
+        businessId: 'business-123', period: '2025-hv-02',
+        merkleRoot: '0x' + 'c'.repeat(64), txHash: '0x' + 'd'.repeat(64), status: 'confirmed',
+      });
+
+      const result = await listByBusiness(mockClient, 'business-123', { limit: 10, offset: 0 });
+      expect(result.items).toHaveLength(2);
+      expect(result.total).toBe(2);
+      result.items.forEach(item => expect(item.businessId).toBe('business-123'));
+    });
+
+    it('respects pagination limit', async () => {
+      for (let i = 1; i <= 5; i++) {
+        await create(mockClient, {
+          businessId: 'business-456', period: `2025-pg-${i.toString().padStart(2, '0')}`,
+          merkleRoot: '0x' + i.toString().repeat(64), txHash: '0x' + (i + 1).toString().repeat(64),
+          status: 'pending',
+        });
+      }
+
+      const page1 = await listByBusiness(mockClient, 'business-456', { limit: 2, offset: 0 });
+      expect(page1.items).toHaveLength(2);
+      expect(page1.total).toBe(5);
+    });
+
+    it('does not return attestations from other businesses', async () => {
+      await create(mockClient, {
+        businessId: 'business-123', period: '2025-iso-01',
+        merkleRoot: '0x' + 'a'.repeat(64), txHash: '0x' + 'b'.repeat(64), status: 'pending',
+      });
+      await create(mockClient, {
+        businessId: 'business-456', period: '2025-iso-02',
+        merkleRoot: '0x' + 'c'.repeat(64), txHash: '0x' + 'd'.repeat(64), status: 'pending',
+      });
+
+      const result = await listByBusiness(mockClient, 'business-123', { limit: 10, offset: 0 });
+      expect(result.items.every(i => i.businessId === 'business-123')).toBe(true);
+    });
+
+    it('applies statement_timeout when timeoutMs > 0', async () => {
+      const trackingClient = new TimeoutTrackingMockDbClient();
+      await listByBusiness(trackingClient, 'business-123', { limit: 10, offset: 0 }, 5000);
+      expect(trackingClient.timeoutStatements.some(s => s.includes('5000'))).toBe(true);
+    });
+
+    it('does not set statement_timeout when timeoutMs is 0', async () => {
+      const trackingClient = new TimeoutTrackingMockDbClient();
+      await listByBusiness(trackingClient, 'business-123', { limit: 10, offset: 0 }, 0);
+      expect(trackingClient.timeoutStatements).toHaveLength(0);
+    });
+  });
+
+  // ── countByBusiness ─────────────────────────────────────────────────────────
+
+  describe('countByBusiness', () => {
+    it('returns 0 for a business with no attestations', async () => {
+      expect(await countByBusiness(mockClient, 'business-123')).toBe(0);
+    });
+
+    it('returns correct count after inserts', async () => {
+      await create(mockClient, {
+        businessId: 'business-789', period: '2025-cnt-01',
+        merkleRoot: '0x' + 'e'.repeat(64), txHash: '0x' + 'f'.repeat(64), status: 'pending',
+      });
+      await create(mockClient, {
+        businessId: 'business-789', period: '2025-cnt-02',
+        merkleRoot: '0x' + 'g'.repeat(64), txHash: '0x' + 'h'.repeat(64), status: 'confirmed',
+      });
+
+      expect(await countByBusiness(mockClient, 'business-789')).toBe(2);
+    });
+
+    it('count is independent of other businesses', async () => {
+      await create(mockClient, {
+        businessId: 'business-123', period: '2025-cnt-x',
+        merkleRoot: '0x' + 'i'.repeat(64), txHash: '0x' + 'j'.repeat(64), status: 'pending',
+      });
+
+      expect(await countByBusiness(mockClient, 'business-456')).toBe(0);
+    });
+
+    it('applies statement_timeout when timeoutMs > 0', async () => {
+      const trackingClient = new TimeoutTrackingMockDbClient();
+      await countByBusiness(trackingClient, 'business-123', 3000);
+      expect(trackingClient.timeoutStatements.some(s => s.includes('3000'))).toBe(true);
+    });
+  });
+
+  // ── listByStatus ────────────────────────────────────────────────────────────
+
+  describe('listByStatus', () => {
+    it('returns empty result when no attestations match status', async () => {
+      const result = await listByStatus(mockClient, 'revoked', { limit: 10, offset: 0 });
+      expect(result.items).toHaveLength(0);
+      expect(result.total).toBe(0);
+    });
+
+    it('returns only attestations matching the requested status', async () => {
+      await create(mockClient, {
+        businessId: 'business-123', period: '2025-st-01',
+        merkleRoot: '0x' + 'k'.repeat(64), txHash: '0x' + 'l'.repeat(64), status: 'pending',
+      });
+      await create(mockClient, {
+        businessId: 'business-456', period: '2025-st-02',
+        merkleRoot: '0x' + 'm'.repeat(64), txHash: '0x' + 'n'.repeat(64), status: 'confirmed',
+      });
+      await create(mockClient, {
+        businessId: 'business-789', period: '2025-st-03',
+        merkleRoot: '0x' + 'o'.repeat(64), txHash: '0x' + 'p'.repeat(64), status: 'pending',
+      });
+
+      const result = await listByStatus(mockClient, 'pending', { limit: 10, offset: 0 });
+      expect(result.items.every(i => i.status === 'pending')).toBe(true);
+    });
+
+    it('total reflects all matching rows regardless of pagination', async () => {
+      for (let i = 1; i <= 4; i++) {
+        await create(mockClient, {
+          businessId: 'business-123', period: `2025-stpg-${i}`,
+          merkleRoot: '0x' + i.toString().repeat(64), txHash: '0x' + (i + 5).toString().repeat(64),
+          status: 'submitted',
+        });
+      }
+
+      const page = await listByStatus(mockClient, 'submitted', { limit: 2, offset: 0 });
+      expect(page.total).toBe(4);
+      expect(page.items).toHaveLength(2);
+    });
+
+    it('applies statement_timeout when timeoutMs > 0', async () => {
+      const trackingClient = new TimeoutTrackingMockDbClient();
+      await listByStatus(trackingClient, 'pending', { limit: 10, offset: 0 }, 2000);
+      expect(trackingClient.timeoutStatements.some(s => s.includes('2000'))).toBe(true);
+    });
+
+    it('does not set statement_timeout when timeoutMs is 0', async () => {
+      const trackingClient = new TimeoutTrackingMockDbClient();
+      await listByStatus(trackingClient, 'pending', { limit: 10, offset: 0 }, 0);
+      expect(trackingClient.timeoutStatements).toHaveLength(0);
+    });
+  });
+
+  // ── Statement timeout reset ─────────────────────────────────────────────────
+
+  describe('statement timeout reset', () => {
+    it('resets timeout to 0 after a successful query', async () => {
+      const trackingClient = new TimeoutTrackingMockDbClient();
+      await listByBusiness(trackingClient, 'business-123', { limit: 5, offset: 0 }, 1000);
+      // Should have SET 1000 then SET 0
+      expect(trackingClient.timeoutStatements).toHaveLength(2);
+      expect(trackingClient.timeoutStatements[0]).toMatch(/1000/);
+      expect(trackingClient.timeoutStatements[1]).toMatch(/0/);
     });
   });
 });

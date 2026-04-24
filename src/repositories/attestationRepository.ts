@@ -1,9 +1,27 @@
 /**
  * Attestation Repository
- * 
+ *
  * Data access layer for blockchain attestation records.
  * Provides CRUD operations for attestations with proper type safety and error handling.
  * Includes write conflict detection and handling for concurrent operations.
+ *
+ * High-volume query patterns
+ * --------------------------
+ * listByBusiness  — uses idx: attestations_business_id_created_at_idx (business_id, created_at DESC)
+ * countByBusiness — same index, index-only scan when possible
+ * listByStatus    — uses idx: attestations_status_created_at_idx (status, created_at DESC)
+ *
+ * Statement timeouts
+ * ------------------
+ * All public query helpers accept an optional `timeoutMs` parameter.
+ * When provided, the session-level `statement_timeout` is set before the
+ * query and reset afterwards.  Operators can also set a global default via
+ * the ATTESTATION_QUERY_TIMEOUT_MS environment variable (default: none).
+ *
+ * Read-replica routing (future)
+ * -----------------------------
+ * Pass a read-replica DbClient to any read method.  The repository is
+ * stateless and does not manage connection routing itself.
  */
 
 import {
@@ -18,6 +36,32 @@ import {
   ConflictErrorType,
   createConflictError,
 } from '../types/attestation.js';
+import { logger } from '../utils/logger.js';
+
+/** Default statement timeout from env (0 = disabled). */
+const DEFAULT_TIMEOUT_MS = parseInt(process.env.ATTESTATION_QUERY_TIMEOUT_MS ?? '0', 10);
+
+/**
+ * Wraps a query with an optional per-session statement_timeout.
+ * Resets the timeout to 0 (disabled) after the query completes.
+ */
+async function withTimeout<T>(
+  client: DbClient,
+  timeoutMs: number,
+  fn: () => Promise<T>
+): Promise<T> {
+  const ms = timeoutMs || DEFAULT_TIMEOUT_MS;
+  if (ms > 0) {
+    await client.query(`SET LOCAL statement_timeout = ${ms}`);
+  }
+  try {
+    return await fn();
+  } finally {
+    if (ms > 0) {
+      await client.query('SET LOCAL statement_timeout = 0');
+    }
+  }
+}
 
 /**
  * Database row type with snake_case column names
@@ -83,10 +127,13 @@ export async function create(
 
   try {
     const result = await client.query<AttestationRow>(sql, params);
-    return mapRowToAttestation(result.rows[0]);
+    const attestation = mapRowToAttestation(result.rows[0]);
+    logger.info(JSON.stringify({ event: 'attestation.created', id: attestation.id, businessId: attestation.businessId, period: attestation.period }));
+    return attestation;
   } catch (error: any) {
     // Handle unique constraint violation (duplicate businessId + period)
     if (error.code === '23505') {
+      logger.warn(JSON.stringify({ event: 'attestation.create.duplicate', businessId: data.businessId, period: data.period }));
       throw createConflictError(
         ConflictErrorType.CONFLICT_TYPE_DUPLICATE,
         `Attestation for business ${data.businessId} and period ${data.period} already exists`,
@@ -95,12 +142,14 @@ export async function create(
     }
     // Handle foreign key violation
     if (error.code === '23503') {
+      logger.warn(JSON.stringify({ event: 'attestation.create.foreignKey', businessId: data.businessId }));
       throw createConflictError(
         ConflictErrorType.CONFLICT_TYPE_FOREIGN_KEY,
         `Business with id ${data.businessId} does not exist`,
         { businessId: data.businessId }
       );
     }
+    logger.error(JSON.stringify({ event: 'attestation.create.error', businessId: data.businessId, error: error.message }));
     throw error;
   }
 }
@@ -480,4 +529,148 @@ export async function remove(
   const result = await client.query<{ id: string }>(sql, [id]);
   
   return result.rows.length > 0;
+}
+
+// ─── High-volume query patterns ───────────────────────────────────────────────
+
+/**
+ * Lists attestations for a single business, ordered by created_at DESC.
+ *
+ * Index expectation: attestations_business_id_created_at_idx
+ *   (business_id, created_at DESC)
+ *
+ * At high volume (>100 k rows per business) this query should show an
+ * Index Scan on that composite index.  Verify with:
+ *   EXPLAIN (ANALYZE, BUFFERS)
+ *   SELECT * FROM attestations
+ *   WHERE business_id = '<id>'
+ *   ORDER BY created_at DESC
+ *   LIMIT 50 OFFSET 0;
+ *
+ * @param client     - Database client (may be a read replica)
+ * @param businessId - UUID of the business
+ * @param pagination - Limit / offset
+ * @param timeoutMs  - Optional per-query statement timeout in milliseconds
+ * @returns Paginated attestations for the business
+ */
+export async function listByBusiness(
+  client: DbClient,
+  businessId: string,
+  pagination: PaginationParams,
+  timeoutMs = 0
+): Promise<PaginatedResult<Attestation>> {
+  return withTimeout(client, timeoutMs, async () => {
+    // Index: attestations_business_id_created_at_idx (business_id, created_at DESC)
+    const dataQuery = `
+      SELECT * FROM attestations
+      WHERE business_id = $1
+      ORDER BY created_at DESC
+      LIMIT $2 OFFSET $3
+    `;
+    const countQuery = `
+      SELECT COUNT(*) FROM attestations
+      WHERE business_id = $1
+    `;
+
+    const [countResult, dataResult] = await Promise.all([
+      client.query<{ count: string }>(countQuery, [businessId]),
+      client.query<AttestationRow>(dataQuery, [businessId, pagination.limit, pagination.offset]),
+    ]);
+
+    const total = parseInt(countResult.rows[0].count, 10);
+    const items = dataResult.rows.map(mapRowToAttestation);
+
+    logger.info(JSON.stringify({
+      event: 'attestation.listByBusiness',
+      businessId,
+      total,
+      limit: pagination.limit,
+      offset: pagination.offset,
+    }));
+
+    return { items, total };
+  });
+}
+
+/**
+ * Returns the total number of attestations for a business.
+ *
+ * Index expectation: attestations_business_id_created_at_idx
+ *   (business_id, created_at DESC) — index-only scan when possible.
+ *
+ * @param client     - Database client (may be a read replica)
+ * @param businessId - UUID of the business
+ * @param timeoutMs  - Optional per-query statement timeout in milliseconds
+ * @returns Total attestation count for the business
+ */
+export async function countByBusiness(
+  client: DbClient,
+  businessId: string,
+  timeoutMs = 0
+): Promise<number> {
+  return withTimeout(client, timeoutMs, async () => {
+    // Index: attestations_business_id_created_at_idx (business_id, created_at DESC)
+    const sql = `SELECT COUNT(*) FROM attestations WHERE business_id = $1`;
+    const result = await client.query<{ count: string }>(sql, [businessId]);
+    const count = parseInt(result.rows[0].count, 10);
+
+    logger.info(JSON.stringify({ event: 'attestation.countByBusiness', businessId, count }));
+    return count;
+  });
+}
+
+/**
+ * Lists attestations filtered by status, ordered by created_at DESC.
+ *
+ * Index expectation: attestations_status_created_at_idx
+ *   (status, created_at DESC)
+ *
+ * Useful for background jobs that process pending/submitted attestations.
+ * At high volume verify with:
+ *   EXPLAIN (ANALYZE, BUFFERS)
+ *   SELECT * FROM attestations
+ *   WHERE status = 'pending'
+ *   ORDER BY created_at DESC
+ *   LIMIT 50 OFFSET 0;
+ *
+ * @param client     - Database client (may be a read replica)
+ * @param status     - Attestation status to filter by
+ * @param pagination - Limit / offset
+ * @param timeoutMs  - Optional per-query statement timeout in milliseconds
+ * @returns Paginated attestations matching the status
+ */
+export async function listByStatus(
+  client: DbClient,
+  status: AttestationStatus,
+  pagination: PaginationParams,
+  timeoutMs = 0
+): Promise<PaginatedResult<Attestation>> {
+  return withTimeout(client, timeoutMs, async () => {
+    // Index: attestations_status_created_at_idx (status, created_at DESC)
+    const dataQuery = `
+      SELECT * FROM attestations
+      WHERE status = $1
+      ORDER BY created_at DESC
+      LIMIT $2 OFFSET $3
+    `;
+    const countQuery = `SELECT COUNT(*) FROM attestations WHERE status = $1`;
+
+    const [countResult, dataResult] = await Promise.all([
+      client.query<{ count: string }>(countQuery, [status]),
+      client.query<AttestationRow>(dataQuery, [status, pagination.limit, pagination.offset]),
+    ]);
+
+    const total = parseInt(countResult.rows[0].count, 10);
+    const items = dataResult.rows.map(mapRowToAttestation);
+
+    logger.info(JSON.stringify({
+      event: 'attestation.listByStatus',
+      status,
+      total,
+      limit: pagination.limit,
+      offset: pagination.offset,
+    }));
+
+    return { items, total };
+  });
 }
