@@ -2,6 +2,25 @@
 
 This directory contains integration tests for the Veritasor Backend API.
 
+## Redaction Policy
+
+`requestLogger` never writes sensitive values to logs. The policy is enforced via two exported sets in `src/middleware/requestLogger.ts`:
+
+| Set | Members |
+|-----|---------|
+| `REDACTED_HEADERS` | `authorization`, `cookie`, `set-cookie`, `x-api-key`, `x-auth-token` |
+| `REDACTED_QUERY_PARAMS` | `token`, `access_token`, `refresh_token`, `api_key`, `apikey`, `secret`, `password`, `reset_token`, `code` |
+
+Matched values are replaced with the literal string `[REDACTED]` before the log entry is written. Non-sensitive fields pass through unchanged.
+
+**Threat model notes:**
+- Bearer tokens in `Authorization` headers are excluded from logs entirely (headers are not logged).
+- Cookies and `Set-Cookie` are in `REDACTED_HEADERS` for future-proofing if header logging is added.
+- OAuth `code` and `state` query params are redacted to prevent authorization-code interception via log aggregators.
+- Webhook payloads and request bodies are never logged (existing policy).
+
+To extend the policy, add entries to `REDACTED_HEADERS` or `REDACTED_QUERY_PARAMS` in `src/middleware/requestLogger.ts`. Tests in `tests/integration/auth.test.ts` under `"requestLogger redaction policy"` verify coverage.
+
 ## Running Tests
 
 ```bash
