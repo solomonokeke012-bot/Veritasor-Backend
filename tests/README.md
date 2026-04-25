@@ -94,14 +94,63 @@ import { integrationsRouter } from '../../src/routes/integrations.js'
 app.use('/api/integrations', integrationsRouter)
 ```
 
-## Database Strategy
+## Soroban RPC Client Configuration
 
-For integration tests with a real database:
+The Soroban RPC client includes comprehensive timeout, retry, and resilience configuration for production deployments.
 
-1. **Test Database** - Use a separate test database
-2. **Migrations** - Run migrations before tests
-3. **Cleanup** - Clear data between tests
-4. **Transactions** - Wrap tests in transactions and rollback
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SOROBAN_RPC_URL` | `https://soroban-testnet.stellar.org` | Soroban RPC endpoint URL |
+| `SOROBAN_CONTRACT_ID` | Required | Deployed attestation contract address (C...) |
+| `SOROBAN_NETWORK_PASSPHRASE` | `Test SDF Network ; September 2015` | Stellar network passphrase |
+| `SOROBAN_RPC_TIMEOUT_MS` | `5000` | Timeout for individual RPC requests (100-60000ms) |
+| `SOROBAN_RPC_MAX_RETRIES` | `2` | Maximum retry attempts after initial failure (0-5) |
+| `SOROBAN_RPC_RETRY_BASE_DELAY_MS` | `200` | Base delay for exponential backoff (1-30000ms) |
+| `SOROBAN_RPC_RETRY_MAX_DELAY_MS` | `1500` | Maximum delay for exponential backoff (1-30000ms) |
+| `SOROBAN_RPC_RETRY_JITTER_RATIO` | `0.2` | Jitter ratio to reduce synchronized retries (0-1) |
+| `SOROBAN_RPC_CIRCUIT_BREAKER_THRESHOLD` | `5` | Consecutive failures before opening circuit breaker (1-20) |
+| `SOROBAN_RPC_CIRCUIT_BREAKER_RESET_MS` | `30000` | Time before attempting to close circuit breaker (1000-300000ms) |
+
+### Resilience Features
+
+- **Timeout Protection**: Individual requests timeout to prevent hanging
+- **Exponential Backoff**: Delays increase exponentially with jitter to reduce thundering herd
+- **Circuit Breaker**: Prevents cascading failures by temporarily rejecting requests when service is unhealthy
+- **Enhanced Error Classification**: Retries DNS failures, stale connections, and rate limits
+- **Observability Hooks**: Structured logging and metrics collection for monitoring
+
+### Security Considerations
+
+- No sensitive data (keys, tokens) is logged
+- Circuit breaker prevents resource exhaustion attacks
+- Rate limit awareness prevents 429 response cascades
+- Request IDs enable distributed tracing
+
+### Monitoring
+
+The client emits structured logs for:
+- Request start/completion with timing
+- Retry attempts with delay information
+- Circuit breaker state changes
+- Transport failures with error classification
+
+Use observability hooks for custom metrics collection:
+
+```typescript
+const hooks: SorobanObservabilityHooks = {
+  onRequestSuccess: (op, attempt, duration) => {
+    metrics.record(`soroban.${op}.success`, duration)
+  },
+  onRequestFailure: (op, attempt, duration, error) => {
+    metrics.record(`soroban.${op}.failure`, { duration, error: error.message })
+  },
+  onCircuitBreakerStateChange: (oldState, newState) => {
+    logger.info('Circuit breaker state changed', { oldState, newState })
+  }
+}
+```
 
 Example setup:
 
