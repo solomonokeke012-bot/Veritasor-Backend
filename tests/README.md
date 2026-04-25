@@ -247,3 +247,121 @@ The following security assumptions are baked into the system and must be validat
 4. **Idempotency Integrity**:
     - *Assumption*: Multiple identical requests do not result in multiple on-chain transactions (saving gas/fees).
     - *Validation*: Check local database for single record entry after multiple POST bursts.
+
+---
+
+## Attestation Repository — High-Volume Query Guidance
+
+### Overview
+
+`src/repositories/attestationRepository.ts` is designed to remain performant
+under high attestation volume (thousands of records per business, large page
+sizes, concurrent writes).  The patterns below are enforced by the unit tests
+in `tests/unit/repositories/attestationRepository.test.ts`.
+
+### Indexes
+
+The migration `20260225_001_create_attestations_table.sql` creates three
+indexes that all repository queries are written to exploit:
+
+| Index | Columns | Used by |
+|---|---|---|
+| `attestations_business_id_idx` | `business_id` | `list` (businessId filter), `getByBusinessAndPeriod` |
+| `attestations_status_idx` | `status` | future status-filtered queries |
+| `attestations_created_at_idx` | `created_at DESC` | `list` ORDER BY |
+
+The composite UNIQUE constraint on `(business_id, period)` doubles as an index
+for `getByBusinessAndPeriod` lookups.
+
+**Operator checklist** — run `EXPLAIN (ANALYZE, BUFFERS)` on the following
+queries after any schema change and confirm index scans (not seq scans) are
+used for tables with > 10 000 rows:
+
+```sql
+-- list by business
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT * FROM attestations WHERE business_id = $1 ORDER BY created_at DESC LIMIT 50;
+
+-- lookup by business + period
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT * FROM attestations WHERE business_id = $1 AND period = $2;
+```
+
+### Statement Timeout
+
+Every repository function issues `SET LOCAL statement_timeout = <ms>` before
+executing its data query.  This cancels runaway queries before they exhaust
+the connection pool.
+
+| Environment variable | Default | Effect |
+|---|---|---|
+| `ATTESTATION_QUERY_TIMEOUT_MS` | `5000` | Max ms a single query may run |
+
+Set to `0` to disable (not recommended in production).
+
+PostgreSQL raises error code `57014` (`query_canceled`) when the timeout fires.
+The repository does **not** catch `57014` — it propagates to the caller so the
+HTTP layer can return `503 Service Unavailable` or retry with backoff.
+
+### Structured Logging
+
+Two thresholds trigger a `[WARN]` structured JSON log entry:
+
+| Environment variable | Default | Trigger |
+|---|---|---|
+| `SLOW_QUERY_WARN_MS` | `1000` | Query elapsed time ≥ threshold |
+| `SLOW_QUERY_ROW_THRESHOLD` | `500` | Result row count ≥ threshold |
+
+Example log entry:
+
+```json
+{
+  "event": "attestation_repo_slow_query",
+  "op": "list",
+  "elapsedMs": 1340,
+  "rowCount": 620,
+  "thresholdMs": 1000,
+  "thresholdRows": 500,
+  "businessId": "biz-abc",
+  "limit": 1000,
+  "offset": 0,
+  "total": 620
+}
+```
+
+Forward these entries to your log aggregator (ELK, Datadog, CloudWatch) and
+alert when `elapsedMs` exceeds your SLA budget.
+
+### Failure Modes
+
+| Failure | pg error code | Repository behaviour |
+|---|---|---|
+| Statement timeout | `57014` | Propagates — caller must handle |
+| Duplicate insert | `23505` | Wrapped as `ConflictError` (DUPLICATE) |
+| Foreign-key violation | `23503` | Wrapped as `ConflictError` (FOREIGN_KEY) |
+| Version mismatch | — | Wrapped as `ConflictError` (VERSION_MISMATCH) |
+| Connection error | varies | Propagates unwrapped |
+
+### Read Replicas (Future)
+
+The `client` parameter on every function is intentionally injectable.  When a
+read replica is available, pass a replica pool client to `getById`,
+`getByBusinessAndPeriod`, and `list` to offload read traffic.  Write functions
+(`create`, `update`, `updateStatus`, `remove`) must always use the primary.
+
+### Threat Model Notes
+
+- **Auth**: All repository functions accept a `DbClient` and perform no
+  authentication themselves.  Callers (route handlers) are responsible for
+  ensuring the authenticated user owns the `businessId` before passing it to
+  the repository.  See `requireBusinessAuth` middleware.
+- **Injection**: All queries use parameterised placeholders (`$1`, `$2`, …).
+  No string interpolation of user-supplied values occurs.
+- **Timeout abuse**: A malicious client cannot force a long-running query by
+  sending a large `limit` — the statement timeout caps wall-clock execution
+  regardless of result size.
+- **Webhooks / integrations**: Webhook endpoints use separate HMAC signature
+  verification and do not share the attestation rate-limit bucket.
+- **Idempotency**: `createWithConflictCheck` with `returnExistingOnConflict: true`
+  provides idempotent create semantics; duplicate submissions return the
+  existing record rather than creating a second one.
