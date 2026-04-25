@@ -3,7 +3,16 @@ import {
   normalizeRevenueEntry,
   detectNormalizationDrift,
 } from "../../../../src/services/revenue/normalize.js";
-import type { NormalizedRevenue, NormalizationBaseline } from "../../../../src/services/revenue/normalize.js";
+import type {
+  RawRevenueInput,
+  NormalizedRevenue,
+  NormalizationBaseline,
+} from "../../../../src/services/revenue/normalize.js";
+
+/** Build a minimal valid RawRevenueInput with optional overrides. */
+function raw(overrides: Partial<RawRevenueInput> & { id: string; amount: number }): RawRevenueInput {
+  return { date: "2025-01-01T00:00:00Z", source: "stripe", ...overrides };
+}
 
 describe("revenue normalizer", () => {
   it("should produce the canonical shape", () => {
