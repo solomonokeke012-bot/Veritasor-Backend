@@ -448,6 +448,70 @@ describe('Business Service Integration Tests', () => {
     });
   });
 
+  describe('GET /api/businesses - List Businesses', () => {
+    beforeEach(async () => {
+      // Create some businesses to list
+      for (let i = 0; i < 5; i++) {
+        await request(app)
+          .post('/api/businesses')
+          .set(createAuthHeader(`test-user-list-${i}`))
+          .send({
+            name: `List Test Corp ${i}`,
+            industry: i % 2 === 0 ? 'Tech' : 'Retail',
+          });
+      }
+    });
+
+    it('should return a list of businesses with pagination', async () => {
+      const res = await request(app).get('/api/businesses?limit=2');
+
+      expect(res.status).toBe(200);
+      expect(res.body.items).toBeDefined();
+      expect(Array.isArray(res.body.items)).toBe(true);
+      expect(res.body.items.length).toBeLessThanOrEqual(2);
+    });
+
+    it('should support keyset pagination with cursor', async () => {
+      const page1 = await request(app).get('/api/businesses?limit=2&sortBy=name&sortOrder=asc');
+      expect(page1.status).toBe(200);
+      
+      if (page1.body.nextCursor) {
+        const page2 = await request(app).get(`/api/businesses?limit=2&sortBy=name&sortOrder=asc&cursor=${encodeURIComponent(page1.body.nextCursor)}`);
+        expect(page2.status).toBe(200);
+        expect(page2.body.items.length).toBeGreaterThan(0);
+        
+        // Ensure no duplicates between pages
+        const page1Ids = page1.body.items.map((i: any) => i.id);
+        const page2Ids = page2.body.items.map((i: any) => i.id);
+        const overlap = page1Ids.filter((id: string) => page2Ids.includes(id));
+        expect(overlap.length).toBe(0);
+      }
+    });
+
+    it('should support filtering by industry', async () => {
+      const res = await request(app).get('/api/businesses?industry=Tech');
+      expect(res.status).toBe(200);
+      
+      for (const item of res.body.items) {
+        expect(item.industry).toBe('Tech');
+      }
+    });
+
+    it('should validate limit bounds', async () => {
+      const resHigh = await request(app).get('/api/businesses?limit=1000');
+      expect(resHigh.status).toBe(400); // Because max limit is 100
+
+      const resLow = await request(app).get('/api/businesses?limit=0');
+      expect(resLow.status).toBe(400); // Because min limit is 1
+    });
+
+    it('should safely handle invalid cursor', async () => {
+      const res = await request(app).get('/api/businesses?cursor=invalid-cursor-string');
+      // Should not crash, just ignore invalid cursor or return first page
+      expect([200, 400]).toContain(res.status);
+    });
+  });
+
   describe('Input Normalization Edge Cases', () => {
     it('should handle unicode characters in optional fields', async () => {
       const res = await request(app)

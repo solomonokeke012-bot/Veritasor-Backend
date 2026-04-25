@@ -296,3 +296,34 @@ export async function safeParseUpdateBusinessInput(input: unknown) {
   const result = await updateBusinessInputSchema.safeParseAsync(input);
   return result;
 }
+
+/**
+ * Business List Query Schema
+ *
+ * Validates pagination and filtering parameters for listing businesses.
+ */
+export const businessListQuerySchema = z.object({
+  limit: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(100)
+    .default(20),
+  cursor: z
+    .string()
+    .optional(),
+  sortBy: z
+    .enum(['createdAt', 'name'])
+    .default('createdAt'),
+  sortOrder: z
+    .enum(['asc', 'desc'])
+    .default('desc'),
+  industry: z
+    .string()
+    .max(INDUSTRY_MAX_LENGTH)
+    .trim()
+    .optional()
+    .transform((val) => (val === '' ? undefined : val)),
+});
+
+export type BusinessListQuery = z.infer<typeof businessListQuerySchema>;
