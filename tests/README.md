@@ -422,3 +422,45 @@ The same middleware instance is used on all business-scoped routers
 `tests/unit/middleware/requireBusinessAuth.test.ts` runs every error-code
 scenario against all three route contexts via `it.each` to guarantee identical
 error shapes regardless of which router the request hits.
+
+---
+
+## API Version Negotiation Middleware
+
+### Negotiation sources (priority order)
+
+| Priority | Source | Example |
+|----------|--------|---------|
+| 1 | URL path prefix | `/api/v1/health` |
+| 2 | `X-API-Version` header | `X-API-Version: 1` |
+| 3 | `Accept-Version` header | `Accept-Version: v1` |
+| 4 | Query param | `?apiVersion=1` or `?api_version=1` |
+| 5 | `Accept` parameter | `Accept: application/json; version=1` |
+| 6 | Default | `v1` |
+
+### Response headers (stable contract)
+
+| Header | Value | Condition |
+|--------|-------|-----------|
+| `API-Version` | Supported label (e.g. `v1`) | Always |
+| `API-Version-Fallback` | `true` | Only when requested version is unsupported |
+| `Vary` | Merged with `Accept, X-API-Version, Accept-Version` | Always |
+
+### Failure modes / edge cases
+
+- **Unsupported major** (e.g. `v99`): falls back to `v1`, sets `API-Version-Fallback: true`. No 4xx is returned — clients must check the fallback header.
+- **Invalid version strings** (`garbage`, `v1beta`, `0`, `-1`, floats): ignored; negotiation falls through to the next source.
+- **Overlong inputs**: `parseVersionToken` rejects strings > 32 chars; `extractVersionFromAccept` rejects Accept headers > 1024 chars (ReDoS / header-smuggling guard).
+- **CRLF-injected headers**: rejected by `parseVersionToken` (no `\r\n` matches `/^v?(\d+)$/`).
+
+### Adding a new major version
+
+1. Append the label to `SUPPORTED_API_VERSIONS` in `src/middleware/apiVersion.ts`.
+2. Mount the new router under `/api/v{n}` in `src/app.ts`.
+3. Add a contract test asserting `source=path`, `version=v{n}`, `fallback=false`.
+
+### Threat model notes
+
+- Version tokens are validated against `/^v?(\d+)$/` — arbitrary strings are never reflected in response headers.
+- Path-segment parsing caps digit length at 3 to prevent integer overflow and ReDoS.
+- `Vary` header is merged (not replaced) so upstream cache entries for different versions are kept distinct.
