@@ -232,3 +232,36 @@ The following security assumptions are baked into the system and must be validat
 4. **Idempotency Integrity**:
     - *Assumption*: Multiple identical requests do not result in multiple on-chain transactions (saving gas/fees).
     - *Validation*: Check local database for single record entry after multiple POST bursts.
+    
+## Read Consistency & Security
+
+Veritasor implements a multi-tier consistency model for reading attestations to balance performance and security.
+
+### Consistency Levels
+
+1.  **LOCAL (Default)**:
+    -   Reads directly from the PostgreSQL database.
+    -   Lowest latency, suitable for most dashboard views.
+    -   Subject to indexing lag (DB might be a few blocks behind the chain).
+
+2.  **STRONG**:
+    -   Reads from the DB and then verifies the record against the Soroban blockchain state.
+    -   Higher latency (requires RPC calls).
+    -   Guarantees the data matches the "Truth on Chain".
+    -   Used for critical audits and legal proof generation.
+
+### Threat Model & Resilience Notes
+
+| Threat | Strategy | Mechanism |
+| :--- | :--- | :--- |
+| **Indexing Lag** | Detection & Auto-Correction | If a STRONG read finds a record on-chain that is still marked as `pending` in the DB, the system auto-updates the DB to `confirmed`. |
+| **Data Tampering** | Integrity Verification | If a STRONG read detects a Merkle root mismatch between the DB and the Chain, it logs a CRITICAL CONSISTENCY ERROR for immediate operator review. |
+| **Revocation Propagation** | Immediate Verification | STRONG reads ensure that if an attestation is revoked on-chain, it is treated as revoked by the system regardless of DB state. |
+| **Network Outage** | Graceful Degradation | If the Soroban RPC is unavailable during a STRONG read, the system falls back to LOCAL data and logs a warning. |
+
+### Operator Runbook: Discrepancies
+
+If a `CRITICAL CONSISTENCY ERROR` is observed in logs:
+1.  Verify the on-chain data using a block explorer or `stellar-cli`.
+2.  Check the database for unauthorized modifications.
+3.  Initiate a manual re-sync if the DB record is corrupted.
