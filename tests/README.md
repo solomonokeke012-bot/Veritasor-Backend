@@ -464,3 +464,35 @@ error shapes regardless of which router the request hits.
 - Version tokens are validated against `/^v?(\d+)$/` — arbitrary strings are never reflected in response headers.
 - Path-segment parsing caps digit length at 3 to prevent integer overflow and ReDoS.
 - `Vary` header is merged (not replaced) so upstream cache entries for different versions are kept distinct.
+
+---
+
+## Analytics Routes — Auth Requirements
+
+### Routes
+
+| Method | Path | Auth | Rate limit |
+|--------|------|------|------------|
+| GET | `/api/analytics/periods` | `requireBusinessAuth` | 30 req / 15 min (`analytics` bucket) |
+| GET | `/api/analytics/revenue` | `requireBusinessAuth` | 30 req / 15 min (`analytics` bucket) |
+
+### Error shapes (stable contract)
+
+| Status | `code` | Trigger |
+|--------|--------|---------|
+| 401 | `MISSING_AUTH` | Missing or malformed `Authorization` header |
+| 401 | `INVALID_TOKEN` | Expired/invalid JWT; user deleted after token issued |
+| 400 | `MISSING_BUSINESS_ID` | No `x-business-id` header and no body field |
+| 403 | `BUSINESS_NOT_FOUND` | Business absent or owned by a different user |
+| 403 | `BUSINESS_SUSPENDED` | Business is suspended |
+| 429 | — | Rate limit exceeded |
+| 400 | — | Bad query params or invalid time window |
+| 404 | — | No data for the requested period |
+
+### Threat model notes
+
+- **Token expiry mid-request**: `requireBusinessAuth` re-validates the token on every request (no session cache). A token that was valid when issued but whose user was subsequently deleted returns `INVALID_TOKEN`.
+- **Role mismatch**: `business.userId === req.user.id` is enforced after DB fetch. A valid token for user A cannot access user B's business.
+- **Suspended businesses**: Suspended businesses receive `403 BUSINESS_SUSPENDED` so operators can distinguish suspension from absence in logs.
+- **businessId isolation**: `res.locals.businessId` is set from `req.business.id` (middleware-verified) — route handlers never read the raw `x-business-id` header directly.
+- **Rate-limit isolation**: The `analytics` bucket is separate from auth and other endpoint buckets so burst traffic on analytics does not consume the budget of other routes.
