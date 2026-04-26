@@ -39,6 +39,32 @@ export async function runStartupDependencyReadinessChecks(): Promise<StartupRead
       : "JWT_SECRET must be set to at least 32 characters in production",
   });
 
+  // CORS origin allowlist check (production only)
+  if (isProduction) {
+    const rawOrigins = process.env.ALLOWED_ORIGINS?.trim() ?? "";
+    const origins = rawOrigins
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const corsReady = origins.length > 0;
+
+    checks.push({
+      dependency: "config",
+      ready: corsReady,
+      reason: corsReady
+        ? undefined
+        : "ALLOWED_ORIGINS must be set in production (comma-separated list of allowed origins)",
+    });
+
+    // Non-fatal warning for HTTP origins in production
+    const httpOrigins = origins.filter((o) => o.startsWith("http://"));
+    if (httpOrigins.length > 0) {
+      console.warn(
+        `[Startup] WARNING: ALLOWED_ORIGINS contains non-TLS origins: ${httpOrigins.join(", ")}`,
+      );
+    }
+  }
+
   const dbConnectionString = process.env.DATABASE_URL?.trim();
   if (dbConnectionString) {
     const dbReady = await checkDatabaseReadiness(dbConnectionString);
