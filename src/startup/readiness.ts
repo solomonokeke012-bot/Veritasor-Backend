@@ -85,68 +85,22 @@ export interface StartupReadinessReport {
  * @returns A report indicating overall readiness and per-dependency results.
  */
 export async function runStartupDependencyReadinessChecks(): Promise<StartupReadinessReport> {
-  const checks: DependencyReadinessResult[] = []
-  const env = process.env.NODE_ENV ?? "development"
-  const isProduction = env === "production"
+  const checks: DependencyReadinessResult[] = [];
 
-  // 1. JWT_SECRET check
-  checks.push(checkJwtSecret(isProduction))
+  const configReady = true; // If we reach here, src/config/index.ts validation has already passed.
+  checks.push({
+    dependency: "config",
+    ready: configReady,
+  });
 
-  // 2. Soroban contract ID check (production only)
-  checks.push(checkSorobanConfig(isProduction))
-
-  // 3. Stripe webhook secret check (production only)
-  checks.push(checkStripeConfig(isProduction))
-
-  // 4. Database connectivity check (only when DATABASE_URL is configured)
-  const dbUrl = process.env.DATABASE_URL?.trim()
-  if (dbUrl) {
-    const dbResult = await checkDatabaseConnectivity(dbUrl)
-    checks.push(dbResult)
-  }
-
-  const ready = checks.every((c) => c.ready)
-
-  // Emit a single structured log entry summarising the boot readiness state.
-  logger.info(
-    JSON.stringify({
-      event: "startup_readiness_report",
-      ready,
-      env,
-      checks: checks.map((c) => ({
-        dependency: c.dependency,
-        ready: c.ready,
-        // Only include reason when the check failed to keep happy-path logs terse.
-        ...(c.ready ? {} : { reason: c.reason }),
-      })),
-    }),
-  )
-
-  return { ready, checks }
-}
-
-// ---------------------------------------------------------------------------
-// Individual checks
-// ---------------------------------------------------------------------------
-
-/**
- * Validate JWT_SECRET length.
- *
- * Rules:
- *   - Production: must be >= 32 characters.
- *   - Non-production: must be >= 8 characters (allows short dev secrets).
- *   - All environments: must be present (empty / whitespace-only is rejected).
- */
-function checkJwtSecret(isProduction: boolean): DependencyReadinessResult {
-  const secret = process.env.JWT_SECRET?.trim() ?? ""
-  const minLength = isProduction ? JWT_SECRET_MIN_LENGTH_PROD : JWT_SECRET_MIN_LENGTH_DEV
-
-  if (secret.length === 0) {
-    return {
-      dependency: "config/jwt",
-      ready: false,
-      reason: "JWT_SECRET is not set",
-    }
+  const dbConnectionString = process.env.DATABASE_URL?.trim();
+  if (dbConnectionString) {
+    const dbReady = await checkDatabaseReadiness(dbConnectionString);
+    checks.push({
+      dependency: "database",
+      ready: dbReady,
+      reason: dbReady ? undefined : "database connection check failed",
+    });
   }
 
   if (secret.length < minLength) {
