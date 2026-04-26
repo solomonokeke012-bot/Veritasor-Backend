@@ -21,6 +21,13 @@ import { StartupReadinessReport } from "./startup/readiness.js";
 export function createApp(readinessReport: StartupReadinessReport): Express {
   const app = express();
 
+
+
+import { runStartupDependencyReadinessChecks } from "./startup/readiness.js";
+
+export async function startServer(port: number): Promise<Server> {
+  // Run startup dependency checks
+  const readinessReport = await runStartupDependencyReadinessChecks();
   if (!readinessReport.ready) {
     const failedChecks = readinessReport.checks
       .filter((check) => !check.ready)
