@@ -2,6 +2,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   normalizeRevenueEntry,
   detectNormalizationDrift,
+  roundAmount,
+  aggregateRevenue,
 } from "../../../../src/services/revenue/normalize.js";
 import type {
   NormalizedRevenue,
