@@ -26,6 +26,8 @@ export function createApp(readinessReport: StartupReadinessReport): Express {
       .filter((check) => !check.ready)
       .map((check) => `${check.dependency}: ${check.reason ?? "failed"}`)
       .join("; ");
+    console.warn(`Warning: Startup dependency checks failed: ${failedChecks}`);
+  }
 
     // Log failed checks but continue with app creation
     console.error(`Startup readiness checks failed: ${failedChecks}`);

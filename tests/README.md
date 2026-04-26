@@ -470,6 +470,86 @@ or alert messages.
 | Store-level checks | Valid token accepted; forged token rejected; expired token rejected and deleted; single-use (replay rejected); cross-user isolation |
 | End-to-end round-trip | Token from initiation accepted by validate; consumed after first use |
 
+## Health Endpoint Tests
+
+The health endpoint tests in `auth.test.ts` validate the stable JSON schema for load balancer probes.
+
+### Endpoint
+
+| Method | Path | Description | Auth Required |
+|--------|------|-------------|---------------|
+| GET | `/api/health` | Basic health check | No |
+| HEAD | `/api/health` | HEAD request support | No |
+
+### Query Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `mode` | `shallow` \| `deep` | `shallow` | Health check mode |
+
+### Response Schema
+
+The health endpoint returns a JSON object conforming to `HealthResponseSchema`:
+
+```typescript
+{
+  status: "ok" | "degraded" | "unhealthy",
+  service: "veritasor-backend",
+  timestamp: string,  // ISO 8601 datetime
+  mode: "shallow" | "deep",
+  db?: "ok" | "down",        // Only if DATABASE_URL is set
+  redis?: "ok" | "down",     // Only if REDIS_URL is set
+  soroban?: "ok" | "down",   // Only in deep mode if SOROBAN_RPC_URL is set
+  email?: "ok" | "down"      // Only in deep mode if SMTP_HOST is set
+}
+```
+
+### Status Codes
+
+| Code | Condition |
+|------|----------|
+| `200` | Service is operational (ok, degraded) |
+| `503` | Service is unhealthy (critical dependency down in deep mode) |
+
+### Status Values
+
+| Status | Meaning |
+|--------|---------|
+| `ok` | All configured dependencies are healthy |
+| `degraded` | Some dependencies are down but service is operational |
+| `unhealthy` | Critical dependency is down (deep mode only, returns 503) |
+
+### Environment Variables
+
+The health endpoint checks connectivity based on these environment variables:
+
+| Variable | Check Performed | Critical |
+|----------|-----------------|----------|
+| `DATABASE_URL` | PostgreSQL `SELECT 1` query | Yes (deep mode) |
+| `REDIS_URL` | Redis `PING` command | No |
+| `SOROBAN_RPC_URL` | Stellar Soroban RPC health check | Yes (deep mode) |
+| `SMTP_HOST` | SMTP port connectivity check | Yes (deep mode) |
+
+### Health Modes
+
+**Shallow Mode (default)**:
+- Checks `DATABASE_URL` (if set) and `REDIS_URL` (if set)
+- Returns `degraded` if database is down
+- Redis being down does not affect status
+
+**Deep Mode (`?mode=deep`)**:
+- Also checks `SOROBAN_RPC_URL` and `SMTP_HOST`
+- Returns `unhealthy` with 503 if any critical dependency (db, soroban, email) is down
+- Returns `degraded` if only non-critical dependencies (redis) are down
+
+### Security Notes
+
+- No authentication required (designed for load balancers)
+- No sensitive data exposed in response
+- Uses read-only operations for all checks
+- Not subject to rate limiting
+- Uses 2-second timeouts to keep response time low
+
 ### Mock Implementation
 
 Auth and integrations tests use in-memory mock routers until the real routes are
