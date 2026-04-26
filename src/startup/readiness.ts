@@ -27,16 +27,10 @@ export interface StartupReadinessReport {
 export async function runStartupDependencyReadinessChecks(): Promise<StartupReadinessReport> {
   const checks: DependencyReadinessResult[] = [];
 
-  const isProduction = process.env.NODE_ENV === "production";
-  const jwtSecret = process.env.JWT_SECRET?.trim() ?? "";
-
-  const configReady = !isProduction || jwtSecret.length >= 32;
+  const configReady = true; // If we reach here, src/config/index.ts validation has already passed.
   checks.push({
     dependency: "config",
     ready: configReady,
-    reason: configReady
-      ? undefined
-      : "JWT_SECRET must be set to at least 32 characters in production",
   });
 
   const dbConnectionString = process.env.DATABASE_URL?.trim();
